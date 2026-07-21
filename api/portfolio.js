@@ -62,7 +62,7 @@ async function updateProfile(token,payload){
 }
 
 async function listPersonnel(token){verifySession(token);const rows=await table('Personnel');return{ok:true,people:rows.map(r=>({personId:r.personId,prefix:r['คำนำหน้า/สมณศักดิ์'],name:r['ชื่อ-ฉายา/นามสกุล'],position:r['ตำแหน่ง'],department:r['ฝ่ายงาน'],personnelType:r['ประเภทบุคลากร'],photoUrl:r.photoUrl,portfolioSlug:r.portfolioSlug,dataStatus:r['สถานะข้อมูล']}))}}
-async function health(){const users=await table('Users');return{ok:true,service:'MCU Smart Portfolio API',version:'2.2.0',auth:'Vercel OIDC / Google WIF',database:'Google Sheets connected',users:users.length}}
+async function health(){const users=await table('Users');return{ok:true,service:'MCU Smart Portfolio API',version:'2.2.1',auth:'Vercel OIDC / Google WIF',database:'Google Sheets connected',users:users.length}}
 async function profileById(id){const r=(await table('Personnel')).find(x=>x.personId===id);if(!r)throw new PublicError('ไม่พบโปรไฟล์บุคลากร',404);return{personId:r.personId,prefix:r['คำนำหน้า/สมณศักดิ์'],name:r['ชื่อ-ฉายา/นามสกุล'],position:r['ตำแหน่ง'],department:r['ฝ่ายงาน'],personnelType:r['ประเภทบุคลากร'],email:r['อีเมล'],phone:r['โทรศัพท์'],photoUrl:r.photoUrl,portfolioSlug:r.portfolioSlug,status:r['สถานะ'],missing:r['ข้อมูลที่ยังขาด'],dataStatus:r['สถานะข้อมูล']}}
 function safeUser(u){return{userId:u.userId,personId:u.personId,email:u.email,role:u.role,status:u.status}}
 
@@ -74,6 +74,7 @@ async function accessToken(){
  const audience=`//iam.googleapis.com/projects/${process.env.GCP_PROJECT_NUMBER}/locations/global/workloadIdentityPools/${process.env.GCP_WORKLOAD_IDENTITY_POOL_ID}/providers/${process.env.GCP_WORKLOAD_IDENTITY_POOL_PROVIDER_ID}`;
  const client=ExternalAccountClient.fromJSON({
   type:'external_account',audience,subject_token_type:'urn:ietf:params:oauth:token-type:jwt',
+  scopes:['https://www.googleapis.com/auth/spreadsheets'],
   token_url:'https://sts.googleapis.com/v1/token',
   service_account_impersonation_url:`https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/${process.env.GCP_SERVICE_ACCOUNT_EMAIL}:generateAccessToken`,
   // Keep Vercel's normal Team audience; do not forward Google's supplier context.
