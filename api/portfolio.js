@@ -21,6 +21,8 @@ export default async function handler(req,res){
   else if(body.action==='listPersonnel')result=await listPersonnel(body.token);
   else if(body.action==='adminOverview')result=await adminOverview(body.token);
   else if(body.action==='adminUpdateUser')result=await adminUpdateUser(body.token,body.payload||{});
+  else if(body.action==='adminCreatePerson')result=await adminCreatePerson(body.token,body.payload||{});
+  else if(body.action==='adminSetPersonActive')result=await adminSetPersonActive(body.token,body.payload||{});
   else if(body.action==='health')result=await health();
   else throw new PublicError('ไม่พบคำสั่งที่ร้องขอ',400);
   return res.status(200).json(result);
@@ -68,7 +70,7 @@ async function adminOverview(token){
  const session=verifySession(token);requireAdmin(session);
  const [people,users]=await Promise.all([table('Personnel'),table('Users')]);
  const byPerson=new Map(users.map(u=>[u.personId,u]));
- const rows=people.map(p=>{const u=byPerson.get(p.personId)||{};return{personId:p.personId,name:p['ชื่อ-ฉายา/นามสกุล'],position:p['ตำแหน่ง'],department:p['ฝ่ายงาน'],email:u.email||p['อีเมล']||'',role:u.role||'USER',status:u.status||'PENDING',lastLoginAt:u.lastLoginAt||'',missing:p['ข้อมูลที่ยังขาด']||'',dataStatus:p['สถานะข้อมูล']||'',photoUrl:p.photoUrl||''}});
+ const rows=people.map(p=>{const u=byPerson.get(p.personId)||{};return{personId:p.personId,name:p['ชื่อ-ฉายา/นามสกุล'],position:p['ตำแหน่ง'],department:p['ฝ่ายงาน'],email:u.email||p['อีเมล']||'',role:normalizeRole(u.role),status:normalizeStatus(u.status),lastLoginAt:u.lastLoginAt||'',missing:p['ข้อมูลที่ยังขาด']||'',dataStatus:p['สถานะข้อมูล']||'',photoUrl:p.photoUrl||''}});
  return{ok:true,summary:{total:rows.length,active:rows.filter(r=>r.status==='ACTIVE').length,admins:rows.filter(r=>['ADMIN','SUPER_ADMIN'].includes(r.role)).length,incomplete:rows.filter(r=>r.dataStatus!=='ข้อมูลครบถ้วน').length},people:rows};
 }
 async function adminUpdateUser(token,payload){
@@ -88,16 +90,48 @@ async function adminUpdateUser(token,payload){
  if(email){const people=await table('Personnel');const person=people.find(p=>p.personId===personId);if(person&&person['อีเมล']!==email){await updateCell('Personnel',person.__row,person.__headers.indexOf('อีเมล')+1,email);await audit(session.email,personId,'ADMIN_SYNC_PERSONNEL','อีเมล',person['อีเมล']||'',email,'SUCCESS',session.role)}}
  return adminOverview(token);
 }
-async function health(){const users=await table('Users');return{ok:true,service:'MCU Smart Portfolio API',version:'2.3.0',auth:'Vercel OIDC / Google WIF',database:'Google Sheets connected',users:users.length}}
+async function adminCreatePerson(token,payload){
+ const session=verifySession(token);requireAdmin(session);
+ const name=sanitize(payload.name,'name');if(!name)throw new PublicError('กรุณาระบุชื่อบุคลากร',400);
+ const email=String(payload.email||'').trim().toLowerCase();if(email&&!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))throw new PublicError('รูปแบบอีเมลไม่ถูกต้อง',400);
+ const [people,users]=await Promise.all([table('Personnel'),table('Users')]);
+ if(email&&users.some(u=>String(u.email||'').trim().toLowerCase()===email))throw new PublicError('อีเมลนี้มีบัญชีอยู่แล้ว',409);
+ const next=n=>String(Math.max(0,...n.map(x=>Number(String(x||'').replace(/\D/g,''))||0))+1).padStart(3,'0');
+ const personId=`P${next(people.map(p=>p.personId))}`,userId=`U${next(users.map(u=>u.userId))}`;
+ const prefix=sanitize(payload.prefix,'prefix'),position=sanitize(payload.position,'position'),department=sanitize(payload.department,'department'),personnelType=sanitize(payload.personnelType,'personnelType');
+ const role=String(payload.role||'USER').toUpperCase(),status=String(payload.status||(email?'ACTIVE':'PENDING')).toUpperCase();
+ if(!['USER','REVIEWER','ADMIN','SUPER_ADMIN'].includes(role))throw new PublicError('บทบาทไม่ถูกต้อง',400);
+ if(!['ACTIVE','INACTIVE','PENDING'].includes(status))throw new PublicError('สถานะไม่ถูกต้อง',400);
+ const slug=String(payload.portfolioSlug||personId.toLowerCase()).trim().replace(/[^a-z0-9-]/gi,'-').replace(/-+/g,'-');
+ const missing=[!email&&'อีเมล','โทรศัพท์','รูปบุคลากร'].filter(Boolean).join(', ');
+ await appendValues('Personnel!A:M',[[personId,prefix,name,position,department,personnelType,email,'','',slug,'ใช้งาน',missing,'รอข้อมูลเพิ่มเติม']]);
+ await appendValues('Users!A:F',[[userId,personId,email,role,status,'']]);
+ await audit(session.email,personId,'ADMIN_CREATE_PERSON','บัญชี','','สร้างบุคลากรใหม่','SUCCESS',`${role}/${status}`);
+ return adminOverview(token);
+}
+async function adminSetPersonActive(token,payload){
+ const session=verifySession(token);requireAdmin(session);const personId=String(payload.personId||'').trim();
+ if(!personId)throw new PublicError('ไม่พบรหัสบุคลากร',400);if(personId===session.personId&&!payload.active)throw new PublicError('ไม่สามารถระงับบัญชีที่กำลังใช้งานอยู่',400);
+ const [users,people]=await Promise.all([table('Users'),table('Personnel')]);const user=users.find(u=>u.personId===personId),person=people.find(p=>p.personId===personId);
+ if(!user||!person)throw new PublicError('ไม่พบบัญชีบุคลากร',404);
+ const nextStatus=payload.active?'ACTIVE':'INACTIVE',personStatus=payload.active?'ใช้งาน':'ระงับ';
+ await updateCell('Users',user.__row,user.__headers.indexOf('status')+1,nextStatus);await updateCell('Personnel',person.__row,person.__headers.indexOf('สถานะ')+1,personStatus);
+ await audit(session.email,personId,payload.active?'ADMIN_RESTORE_PERSON':'ADMIN_ARCHIVE_PERSON','สถานะ',user.status,nextStatus,'SUCCESS',session.role);
+ return adminOverview(token);
+}
+async function health(){const users=await table('Users');return{ok:true,service:'MCU Smart Portfolio API',version:'2.4.0',auth:'Vercel OIDC / Google WIF',database:'Google Sheets connected',users:users.length}}
 async function profileById(id){const r=(await table('Personnel')).find(x=>x.personId===id);if(!r)throw new PublicError('ไม่พบโปรไฟล์บุคลากร',404);return{personId:r.personId,prefix:r['คำนำหน้า/สมณศักดิ์'],name:r['ชื่อ-ฉายา/นามสกุล'],position:r['ตำแหน่ง'],department:r['ฝ่ายงาน'],personnelType:r['ประเภทบุคลากร'],email:r['อีเมล'],phone:r['โทรศัพท์'],photoUrl:r.photoUrl,portfolioSlug:r.portfolioSlug,status:r['สถานะ'],missing:r['ข้อมูลที่ยังขาด'],dataStatus:r['สถานะข้อมูล']}}
 function safeUser(u){return{userId:u.userId,personId:u.personId,email:u.email,role:u.role,status:u.status}}
 function isAdmin(session){return['ADMIN','SUPER_ADMIN'].includes(String(session?.role||'').toUpperCase())}
 function requireAdmin(session){if(!isAdmin(session))throw new PublicError('สงวนสิทธิ์สำหรับผู้ดูแลระบบ',403)}
+function normalizeRole(value){const x=String(value||'USER').trim().toUpperCase();return x==='PERSONNEL'?'USER':x}
+function normalizeStatus(value){const x=String(value||'PENDING').trim().toUpperCase();return x==='PENDING_EMAIL'?'PENDING':x}
 
 async function table(name){const values=await sheetGet(`${name}!A1:Z1000`);const headers=values.shift()||[];return values.filter(r=>r.some(Boolean)).map((r,i)=>{const o={__row:i+2,__headers:headers};headers.forEach((h,j)=>o[h]=r[j]||'');return o})}
 async function sheetGet(range){const token=await accessToken();const url=`https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${encodeURIComponent(range)}?valueRenderOption=FORMATTED_VALUE`;const r=await fetch(url,{headers:{Authorization:`Bearer ${token}`}});if(!r.ok)throw new Error(`Sheets read ${r.status}: ${await r.text()}`);return(await r.json()).values||[]}
 async function updateCell(sheet,row,col,value){const token=await accessToken();const range=`${sheet}!${columnName(col)}${row}`;const url=`https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${encodeURIComponent(range)}?valueInputOption=RAW`;const r=await fetch(url,{method:'PUT',headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json'},body:JSON.stringify({range,majorDimension:'ROWS',values:[[String(value??'')]]})});if(!r.ok)throw new Error(`Sheets update ${r.status}: ${await r.text()}`)}
 async function audit(email,personId,action,field,oldValue,newValue,result,details){const token=await accessToken();const url=`https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${encodeURIComponent('AuditLog!A:J')}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`;const values=[[`AUD-${crypto.randomUUID()}`,new Date().toISOString(),email,personId,action,field,oldValue,newValue,result,details]];const r=await fetch(url,{method:'POST',headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json'},body:JSON.stringify({values})});if(!r.ok)throw new Error(`Audit append ${r.status}: ${await r.text()}`)}
+async function appendValues(range,values){const token=await accessToken();const url=`https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${encodeURIComponent(range)}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`;const r=await fetch(url,{method:'POST',headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json'},body:JSON.stringify({majorDimension:'ROWS',values})});if(!r.ok)throw new Error(`Sheets append ${r.status}: ${await r.text()}`)}
 async function accessToken(){
  const audience=`//iam.googleapis.com/projects/${process.env.GCP_PROJECT_NUMBER}/locations/global/workloadIdentityPools/${process.env.GCP_WORKLOAD_IDENTITY_POOL_ID}/providers/${process.env.GCP_WORKLOAD_IDENTITY_POOL_PROVIDER_ID}`;
  const client=ExternalAccountClient.fromJSON({
