@@ -19,7 +19,7 @@ export default async function handler(req,res){
   else if(body.action==='getProfile')result=await getProfile(body.token);
   else if(body.action==='updateProfile')result=await updateProfile(body.token,body.payload||{});
   else if(body.action==='listPersonnel')result=await listPersonnel(body.token);
-  else if(body.action==='health')result={ok:true,service:'MCU Smart Portfolio API',version:'2.1.0',auth:'Vercel OIDC / Google WIF'};
+  else if(body.action==='health')result={ok:true,service:'MCU Smart Portfolio API',version:'2.1.1',auth:'Vercel OIDC / Google WIF'};
   else throw new PublicError('ไม่พบคำสั่งที่ร้องขอ',400);
   return res.status(200).json(result);
  }catch(error){console.error(error);return res.status(error.status||500).json({ok:false,message:error.publicMessage||'ระบบขัดข้อง กรุณาลองใหม่อีกครั้ง'});}
@@ -75,7 +75,8 @@ async function accessToken(){
   type:'external_account',audience,subject_token_type:'urn:ietf:params:oauth:token-type:jwt',
   token_url:'https://sts.googleapis.com/v1/token',
   service_account_impersonation_url:`https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/${process.env.GCP_SERVICE_ACCOUNT_EMAIL}:generateAccessToken`,
-  subject_token_supplier:{getSubjectToken:getVercelOidcToken}
+  // Keep Vercel's normal Team audience; do not forward Google's supplier context.
+  subject_token_supplier:{getSubjectToken:()=>getVercelOidcToken()}
  });
  if(!client)throw new Error('Unable to initialize Google Workload Identity client');
  const token=await client.getAccessToken();return typeof token==='string'?token:token.token;
