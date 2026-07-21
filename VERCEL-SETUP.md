@@ -4,12 +4,13 @@
 
 ## Google Cloud ที่ต้องพร้อม
 
-1. เปิด Google Sheets API และ IAM Service Account Credentials API
+1. เปิด Google Sheets API, Google Drive API และ IAM Service Account Credentials API
 2. OAuth Web Client ต้องมี Authorized JavaScript origin ของโดเมน Production
 3. Workload Identity Pool `vercel` และ Provider `vercel` ต้องเปิดใช้งาน
 4. Provider ต้องเชื่อม Service Account และจำกัด subject เป็น:
    `owner:mcukalasin47-1471s-projects:project:mcu-kalasin-smart-portfolio:environment:production`
 5. แชร์ Spreadsheet ให้ Service Account เป็น Editor
+6. สร้างโฟลเดอร์หลักฐานใน Google Drive และแชร์ให้ Service Account เป็น Editor
 
 ## Environment Variables บน Vercel
 
@@ -23,6 +24,7 @@
 - `GCP_SERVICE_ACCOUNT_EMAIL` — `smart-portfolio-api@mcu-kalasin-smart-portfolio.iam.gserviceaccount.com`
 - `GCP_WORKLOAD_IDENTITY_POOL_ID` — `vercel`
 - `GCP_WORKLOAD_IDENTITY_POOL_PROVIDER_ID` — `vercel`
+- `DRIVE_FOLDER_ID` — รหัสโฟลเดอร์ Google Drive ที่แชร์ให้ Service Account (ส่วนหลัง `/folders/` ใน URL)
 
 ไม่ต้องตั้ง `GOOGLE_PRIVATE_KEY` หรืออัปโหลดไฟล์ JSON ใด ๆ
 
@@ -32,6 +34,6 @@
 
 ## ตรวจระบบหลัง Redeploy
 
-ส่ง POST ไป `/api/portfolio` ด้วย body `{"action":"health"}` ควรได้ `ok: true` และ version `2.1.0`
+ส่ง POST ไป `/api/portfolio` ด้วย body `{"action":"health"}` ควรได้ `ok: true` และ version `3.0.0`
 
 ระบบจะอนุญาตให้เข้าสู่ระบบเฉพาะอีเมลที่ตรงกับแท็บ `Users` และมีสถานะ `ACTIVE`

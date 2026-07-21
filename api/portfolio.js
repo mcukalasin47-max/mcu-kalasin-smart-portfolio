@@ -23,6 +23,16 @@ export default async function handler(req,res){
   else if(body.action==='adminUpdateUser')result=await adminUpdateUser(body.token,body.payload||{});
   else if(body.action==='adminCreatePerson')result=await adminCreatePerson(body.token,body.payload||{});
   else if(body.action==='adminSetPersonActive')result=await adminSetPersonActive(body.token,body.payload||{});
+  else if(body.action==='portfolioHome')result=await portfolioHome(body.token);
+  else if(body.action==='createWork')result=await createWork(body.token,body.payload||{});
+  else if(body.action==='setWorkState')result=await setWorkState(body.token,body.payload||{});
+  else if(body.action==='addEvidenceLink')result=await addEvidenceLink(body.token,body.payload||{});
+  else if(body.action==='uploadEvidence')result=await uploadEvidence(body.token,body.payload||{});
+  else if(body.action==='reviewerQueue')result=await reviewerQueue(body.token);
+  else if(body.action==='saveReview')result=await saveReview(body.token,body.payload||{});
+  else if(body.action==='publicPortfolio')result=await publicPortfolio(body.slug);
+  else if(body.action==='adminAudit')result=await adminAudit(body.token);
+  else if(body.action==='adminBackup')result=await adminBackup(body.token);
   else if(body.action==='health')result=await health();
   else throw new PublicError('ไม่พบคำสั่งที่ร้องขอ',400);
   return res.status(200).json(result);
@@ -119,10 +129,45 @@ async function adminSetPersonActive(token,payload){
  await audit(session.email,personId,payload.active?'ADMIN_RESTORE_PERSON':'ADMIN_ARCHIVE_PERSON','สถานะ',user.status,nextStatus,'SUCCESS',session.role);
  return adminOverview(token);
 }
-async function health(){const users=await table('Users');return{ok:true,service:'MCU Smart Portfolio API',version:'2.4.0',auth:'Vercel OIDC / Google WIF',database:'Google Sheets connected',users:users.length}}
+async function portfolioHome(token){
+ const session=verifySession(token),[works,evidence,rounds,reviews]=await Promise.all([table('Works'),table('Evidence'),table('EvaluationRounds'),table('Reviews')]);
+ const mine=isAdmin(session)?works:works.filter(w=>w.personId===session.personId),ids=new Set(mine.map(w=>w.workId));
+ const state=w=>String(w.status||w['สถานะ']||'').toUpperCase();
+ return{ok:true,works:mine,evidence:evidence.filter(e=>ids.has(e.workId)),rounds,reviews:isAdmin(session)||isReviewer(session)?reviews:reviews.filter(r=>r.personId===session.personId),summary:{total:mine.filter(w=>state(w)!=='TRASH').length,published:mine.filter(w=>String(w.visibility).toUpperCase()==='PUBLIC'&&state(w)!=='TRASH').length,pending:mine.filter(w=>['SUBMITTED','PENDING'].includes(state(w))).length,trash:mine.filter(w=>state(w)==='TRASH').length}};
+}
+async function createWork(token,payload){
+ const session=verifySession(token),name=sanitize(payload.name,'name');if(!name)throw new PublicError('กรุณาระบุชื่อผลงาน',400);
+ const works=await table('Works'),workId=`W${String(Math.max(0,...works.map(w=>Number(String(w.workId||'').replace(/\D/g,''))||0))+1).padStart(5,'0')}`,now=new Date().toISOString();
+ await appendValues('Works!A:L',[[workId,session.personId,name,sanitize(payload.category,'category'),payload.startDate||'',payload.endDate||'',sanitize(payload.description,'description'),sanitize(payload.round,'round'),payload.submit?'SUBMITTED':'DRAFT',payload.visibility==='PUBLIC'?'PUBLIC':'PRIVATE',now,now]]);
+ await audit(session.email,session.personId,'CREATE_WORK','workId','',workId,'SUCCESS',name);return{ok:true,workId,...await portfolioHome(token)};
+}
+async function setWorkState(token,payload){
+ const session=verifySession(token),works=await table('Works'),work=works.find(w=>w.workId===String(payload.workId||''));if(!work)throw new PublicError('ไม่พบผลงาน',404);if(!isAdmin(session)&&work.personId!==session.personId)throw new PublicError('ไม่มีสิทธิ์แก้ไขผลงานนี้',403);
+ const action=String(payload.state||'').toUpperCase(),statusCol=work.__headers.indexOf('สถานะ')+1,visibilityCol=work.__headers.indexOf('visibility')+1,updatedCol=work.__headers.indexOf('updatedAt')+1;
+ if(['TRASH','DRAFT','SUBMITTED','APPROVED','REVISION'].includes(action))await updateCell('Works',work.__row,statusCol,action);else if(['PUBLIC','PRIVATE'].includes(action))await updateCell('Works',work.__row,visibilityCol,action);else throw new PublicError('สถานะผลงานไม่ถูกต้อง',400);
+ if(updatedCol>0)await updateCell('Works',work.__row,updatedCol,new Date().toISOString());await audit(session.email,work.personId,'SET_WORK_STATE','state','',action,'SUCCESS',work.workId);return portfolioHome(token);
+}
+async function addEvidenceLink(token,payload){
+ const session=verifySession(token),works=await table('Works'),work=works.find(w=>w.workId===String(payload.workId||''));if(!work)throw new PublicError('ไม่พบผลงาน',404);if(!isAdmin(session)&&work.personId!==session.personId)throw new PublicError('ไม่มีสิทธิ์เพิ่มหลักฐาน',403);
+ const url=String(payload.url||'').trim();if(!/^https:\/\//.test(url))throw new PublicError('ลิงก์หลักฐานต้องขึ้นต้นด้วย https://',400);const evidence=await table('Evidence'),id=`E${String(evidence.length+1).padStart(5,'0')}`;
+ await appendValues('Evidence!A:J',[[id,work.workId,sanitize(payload.name,'name')||'หลักฐานประกอบ','LINK','',url,sanitize(payload.description,'description'),session.email,new Date().toISOString(),'ACTIVE']]);await audit(session.email,work.personId,'ADD_EVIDENCE','evidenceId','',id,'SUCCESS',url);return portfolioHome(token);
+}
+async function uploadEvidence(token,payload){
+ const session=verifySession(token);if(!process.env.DRIVE_FOLDER_ID)throw new PublicError('ผู้ดูแลยังไม่ได้กำหนด DRIVE_FOLDER_ID ใน Vercel',503);const raw=String(payload.data||''),m=raw.match(/^data:([^;]+);base64,(.+)$/);if(!m)throw new PublicError('รูปแบบไฟล์ไม่ถูกต้อง',400);const bytes=Buffer.from(m[2],'base64');if(bytes.length>8*1024*1024)throw new PublicError('ไฟล์ต้องมีขนาดไม่เกิน 8 MB',413);
+ const file=await driveCreate(sanitize(payload.fileName,'fileName')||'evidence',m[1],bytes),home=await addEvidenceLink(token,{workId:payload.workId,name:payload.name||payload.fileName,url:file.webViewLink,description:payload.description});await audit(session.email,session.personId,'UPLOAD_DRIVE','fileId','',file.id,'SUCCESS',file.name);return home;
+}
+async function reviewerQueue(token){const session=verifySession(token);if(!isReviewer(session)&&!isAdmin(session))throw new PublicError('สงวนสิทธิ์สำหรับกรรมการและผู้ดูแล',403);const[allReviews,people,works]=await Promise.all([table('Reviews'),table('Personnel'),table('Works')]),reviews=isAdmin(session)?allReviews:allReviews.filter(r=>String(r.reviewerEmail||r['อีเมลกรรมการ']||'').toLowerCase()===session.email);return{ok:true,reviews,people:people.map(p=>({personId:p.personId,name:p['ชื่อ-ฉายา/นามสกุล'],position:p['ตำแหน่ง']})),works:works.filter(w=>String(w.status||w['สถานะ']).toUpperCase()==='SUBMITTED')}}
+async function saveReview(token,payload){const session=verifySession(token);if(!isReviewer(session)&&!isAdmin(session))throw new PublicError('ไม่มีสิทธิ์บันทึกผลประเมิน',403);const reviews=await table('Reviews'),row=reviews.find(r=>r.reviewId===payload.reviewId);if(!row)throw new PublicError('ไม่พบรายการประเมิน',404);const assigned=String(row.reviewerEmail||row['อีเมลกรรมการ']||'').toLowerCase();if(!isAdmin(session)&&assigned!==session.email)throw new PublicError('รายการนี้ไม่ได้มอบหมายให้บัญชีของคุณ',403);const values={สถานะ:String(payload.status||'กำลังประเมิน'),คะแนนรวม:String(payload.score||''),ข้อเสนอแนะ:sanitize(payload.comment,'comment'),'วันที่ประเมิน':new Date().toISOString()};for(const[k,v]of Object.entries(values)){const c=row.__headers.indexOf(k)+1;if(c>0)await updateCell('Reviews',row.__row,c,v)}await audit(session.email,row.personId,'SAVE_REVIEW','reviewId','',row.reviewId,'SUCCESS',values.สถานะ);return reviewerQueue(token)}
+async function publicPortfolio(slug){const[people,works,evidence]=await Promise.all([table('Personnel'),table('Works'),table('Evidence')]),person=people.find(p=>String(p.portfolioSlug||p.personId).toLowerCase()===String(slug||'').toLowerCase());if(!person)throw new PublicError('ไม่พบ Portfolio',404);const pub=works.filter(w=>w.personId===person.personId&&String(w.visibility).toUpperCase()==='PUBLIC'&&String(w['สถานะ']).toUpperCase()!=='TRASH'),ids=new Set(pub.map(w=>w.workId));return{ok:true,profile:{name:person['ชื่อ-ฉายา/นามสกุล'],prefix:person['คำนำหน้า/สมณศักดิ์'],position:person['ตำแหน่ง'],department:person['ฝ่ายงาน'],photoUrl:person.photoUrl},works:pub,evidence:evidence.filter(e=>ids.has(e.workId)&&String(e['สถานะ']).toUpperCase()!=='TRASH')}}
+async function adminAudit(token){const session=verifySession(token);requireAdmin(session);const rows=await table('AuditLog');return{ok:true,rows:rows.slice(-300).reverse()}}
+async function adminBackup(token){const session=verifySession(token);requireAdmin(session);if(!process.env.DRIVE_FOLDER_ID)throw new PublicError('กรุณากำหนด DRIVE_FOLDER_ID ก่อนสำรองข้อมูล',503);const names=['Personnel','Works','Evidence','EvaluationRounds','Indicators','Reviews','Users','Config','AuditLog'],data={createdAt:new Date().toISOString(),createdBy:session.email,sheets:{}};for(const n of names)data.sheets[n]=await table(n);const file=await driveCreate(`MCU-Smart-Portfolio-Backup-${new Date().toISOString().replace(/[:.]/g,'-')}.json`,'application/json',Buffer.from(JSON.stringify(data,null,2)));await pruneBackups();await audit(session.email,session.personId,'ADMIN_BACKUP','driveFileId','',file.id,'SUCCESS',file.name);return{ok:true,file}}
+async function driveCreate(name,mimeType,bytes){const token=await accessToken(),boundary=`mcu-${crypto.randomUUID()}`,meta=JSON.stringify({name,parents:[process.env.DRIVE_FOLDER_ID]}),body=Buffer.concat([Buffer.from(`--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${meta}\r\n--${boundary}\r\nContent-Type: ${mimeType}\r\n\r\n`),bytes,Buffer.from(`\r\n--${boundary}--`)]),r=await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,webViewLink',{method:'POST',headers:{Authorization:`Bearer ${token}`,'Content-Type':`multipart/related; boundary=${boundary}`},body});if(!r.ok)throw new Error(`Drive upload ${r.status}: ${await r.text()}`);return r.json()}
+async function pruneBackups(){const token=await accessToken(),q=encodeURIComponent(`'${process.env.DRIVE_FOLDER_ID}' in parents and name contains 'MCU-Smart-Portfolio-Backup-' and trashed=false`),r=await fetch(`https://www.googleapis.com/drive/v3/files?q=${q}&orderBy=createdTime%20desc&pageSize=100&fields=files(id,name,createdTime)`,{headers:{Authorization:`Bearer ${token}`}});if(!r.ok)return;const files=(await r.json()).files||[];for(const file of files.slice(10))await fetch(`https://www.googleapis.com/drive/v3/files/${file.id}`,{method:'DELETE',headers:{Authorization:`Bearer ${token}`}})}
+async function health(){const users=await table('Users');return{ok:true,service:'MCU Smart Portfolio API',version:'3.0.0',auth:'Vercel OIDC / Google WIF',database:'Google Sheets connected',users:users.length}}
 async function profileById(id){const r=(await table('Personnel')).find(x=>x.personId===id);if(!r)throw new PublicError('ไม่พบโปรไฟล์บุคลากร',404);return{personId:r.personId,prefix:r['คำนำหน้า/สมณศักดิ์'],name:r['ชื่อ-ฉายา/นามสกุล'],position:r['ตำแหน่ง'],department:r['ฝ่ายงาน'],personnelType:r['ประเภทบุคลากร'],email:r['อีเมล'],phone:r['โทรศัพท์'],photoUrl:r.photoUrl,portfolioSlug:r.portfolioSlug,status:r['สถานะ'],missing:r['ข้อมูลที่ยังขาด'],dataStatus:r['สถานะข้อมูล']}}
 function safeUser(u){return{userId:u.userId,personId:u.personId,email:u.email,role:u.role,status:u.status}}
 function isAdmin(session){return['ADMIN','SUPER_ADMIN'].includes(String(session?.role||'').toUpperCase())}
+function isReviewer(session){return String(session?.role||'').toUpperCase()==='REVIEWER'}
 function requireAdmin(session){if(!isAdmin(session))throw new PublicError('สงวนสิทธิ์สำหรับผู้ดูแลระบบ',403)}
 function normalizeRole(value){const x=String(value||'USER').trim().toUpperCase();return x==='PERSONNEL'?'USER':x}
 function normalizeStatus(value){const x=String(value||'PENDING').trim().toUpperCase();return x==='PENDING_EMAIL'?'PENDING':x}
@@ -136,7 +181,7 @@ async function accessToken(){
  const audience=`//iam.googleapis.com/projects/${process.env.GCP_PROJECT_NUMBER}/locations/global/workloadIdentityPools/${process.env.GCP_WORKLOAD_IDENTITY_POOL_ID}/providers/${process.env.GCP_WORKLOAD_IDENTITY_POOL_PROVIDER_ID}`;
  const client=ExternalAccountClient.fromJSON({
   type:'external_account',audience,subject_token_type:'urn:ietf:params:oauth:token-type:jwt',
-  scopes:['https://www.googleapis.com/auth/spreadsheets'],
+  scopes:['https://www.googleapis.com/auth/spreadsheets','https://www.googleapis.com/auth/drive.file'],
   token_url:'https://sts.googleapis.com/v1/token',
   service_account_impersonation_url:`https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/${process.env.GCP_SERVICE_ACCOUNT_EMAIL}:generateAccessToken`,
   // Keep Vercel's normal Team audience; do not forward Google's supplier context.
