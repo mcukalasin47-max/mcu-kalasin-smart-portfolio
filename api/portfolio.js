@@ -19,7 +19,7 @@ export default async function handler(req,res){
   else if(body.action==='getProfile')result=await getProfile(body.token);
   else if(body.action==='updateProfile')result=await updateProfile(body.token,body.payload||{});
   else if(body.action==='listPersonnel')result=await listPersonnel(body.token);
-  else if(body.action==='health')result={ok:true,service:'MCU Smart Portfolio API',version:'2.1.1',auth:'Vercel OIDC / Google WIF'};
+  else if(body.action==='health')result=await health();
   else throw new PublicError('ไม่พบคำสั่งที่ร้องขอ',400);
   return res.status(200).json(result);
  }catch(error){console.error(error);return res.status(error.status||500).json({ok:false,message:error.publicMessage||'ระบบขัดข้อง กรุณาลองใหม่อีกครั้ง'});}
@@ -62,6 +62,7 @@ async function updateProfile(token,payload){
 }
 
 async function listPersonnel(token){verifySession(token);const rows=await table('Personnel');return{ok:true,people:rows.map(r=>({personId:r.personId,prefix:r['คำนำหน้า/สมณศักดิ์'],name:r['ชื่อ-ฉายา/นามสกุล'],position:r['ตำแหน่ง'],department:r['ฝ่ายงาน'],personnelType:r['ประเภทบุคลากร'],photoUrl:r.photoUrl,portfolioSlug:r.portfolioSlug,dataStatus:r['สถานะข้อมูล']}))}}
+async function health(){const users=await table('Users');return{ok:true,service:'MCU Smart Portfolio API',version:'2.2.0',auth:'Vercel OIDC / Google WIF',database:'Google Sheets connected',users:users.length}}
 async function profileById(id){const r=(await table('Personnel')).find(x=>x.personId===id);if(!r)throw new PublicError('ไม่พบโปรไฟล์บุคลากร',404);return{personId:r.personId,prefix:r['คำนำหน้า/สมณศักดิ์'],name:r['ชื่อ-ฉายา/นามสกุล'],position:r['ตำแหน่ง'],department:r['ฝ่ายงาน'],personnelType:r['ประเภทบุคลากร'],email:r['อีเมล'],phone:r['โทรศัพท์'],photoUrl:r.photoUrl,portfolioSlug:r.portfolioSlug,status:r['สถานะ'],missing:r['ข้อมูลที่ยังขาด'],dataStatus:r['สถานะข้อมูล']}}
 function safeUser(u){return{userId:u.userId,personId:u.personId,email:u.email,role:u.role,status:u.status}}
 

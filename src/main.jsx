@@ -4,6 +4,7 @@ import{LayoutDashboard,FolderOpen,ClipboardCheck,FileText,Users,BarChart3,Settin
 import Swal from'sweetalert2';
 import'./style.css';
 import'./auth.css';
+import'./readability.css';
 
 const MCU_LOGO='https://lh3.googleusercontent.com/d/1d-tY28Km9oqKthhgl1s78aTrFa-gsYrP';
 const API_URL=import.meta.env.VITE_API_URL||'/api/portfolio';
