@@ -1,5 +1,6 @@
 import crypto from'node:crypto';
-import{OAuth2Client,GoogleAuth}from'google-auth-library';
+import{OAuth2Client,ExternalAccountClient}from'google-auth-library';
+import{getVercelOidcToken}from'@vercel/oidc';
 
 const SHEET_ID=process.env.SPREADSHEET_ID||'14DxHuvOkNPv9l51Yx-pm6-kHwpUeaVkwZWympl7NVjE';
 const CLIENT_ID=process.env.GOOGLE_CLIENT_ID||process.env.VITE_GOOGLE_CLIENT_ID;
@@ -18,7 +19,7 @@ export default async function handler(req,res){
   else if(body.action==='getProfile')result=await getProfile(body.token);
   else if(body.action==='updateProfile')result=await updateProfile(body.token,body.payload||{});
   else if(body.action==='listPersonnel')result=await listPersonnel(body.token);
-  else if(body.action==='health')result={ok:true,service:'MCU Smart Portfolio API',version:'2.0.0'};
+  else if(body.action==='health')result={ok:true,service:'MCU Smart Portfolio API',version:'2.1.0',auth:'Vercel OIDC / Google WIF'};
   else throw new PublicError('ไม่พบคำสั่งที่ร้องขอ',400);
   return res.status(200).json(result);
  }catch(error){console.error(error);return res.status(error.status||500).json({ok:false,message:error.publicMessage||'ระบบขัดข้อง กรุณาลองใหม่อีกครั้ง'});}
@@ -68,12 +69,22 @@ async function table(name){const values=await sheetGet(`${name}!A1:Z1000`);const
 async function sheetGet(range){const token=await accessToken();const url=`https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${encodeURIComponent(range)}?valueRenderOption=FORMATTED_VALUE`;const r=await fetch(url,{headers:{Authorization:`Bearer ${token}`}});if(!r.ok)throw new Error(`Sheets read ${r.status}: ${await r.text()}`);return(await r.json()).values||[]}
 async function updateCell(sheet,row,col,value){const token=await accessToken();const range=`${sheet}!${columnName(col)}${row}`;const url=`https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${encodeURIComponent(range)}?valueInputOption=USER_ENTERED`;const r=await fetch(url,{method:'PUT',headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json'},body:JSON.stringify({range,majorDimension:'ROWS',values:[[value]]})});if(!r.ok)throw new Error(`Sheets update ${r.status}: ${await r.text()}`)}
 async function audit(email,personId,action,field,oldValue,newValue,result,details){const token=await accessToken();const url=`https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${encodeURIComponent('AuditLog!A:J')}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`;const values=[[`AUD-${crypto.randomUUID()}`,new Date().toISOString(),email,personId,action,field,oldValue,newValue,result,details]];const r=await fetch(url,{method:'POST',headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json'},body:JSON.stringify({values})});if(!r.ok)throw new Error(`Audit append ${r.status}: ${await r.text()}`)}
-async function accessToken(){const auth=new GoogleAuth({credentials:{client_email:process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,private_key:String(process.env.GOOGLE_PRIVATE_KEY||'').replace(/\\n/g,'\n')},scopes:['https://www.googleapis.com/auth/spreadsheets']});const client=await auth.getClient();const token=await client.getAccessToken();return typeof token==='string'?token:token.token}
+async function accessToken(){
+ const audience=`//iam.googleapis.com/projects/${process.env.GCP_PROJECT_NUMBER}/locations/global/workloadIdentityPools/${process.env.GCP_WORKLOAD_IDENTITY_POOL_ID}/providers/${process.env.GCP_WORKLOAD_IDENTITY_POOL_PROVIDER_ID}`;
+ const client=ExternalAccountClient.fromJSON({
+  type:'external_account',audience,subject_token_type:'urn:ietf:params:oauth:token-type:jwt',
+  token_url:'https://sts.googleapis.com/v1/token',
+  service_account_impersonation_url:`https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/${process.env.GCP_SERVICE_ACCOUNT_EMAIL}:generateAccessToken`,
+  subject_token_supplier:{getSubjectToken:getVercelOidcToken}
+ });
+ if(!client)throw new Error('Unable to initialize Google Workload Identity client');
+ const token=await client.getAccessToken();return typeof token==='string'?token:token.token;
+}
 
 function signSession(user){const header=b64({alg:'HS256',typ:'JWT'}),payload=b64({...user,exp:Math.floor(Date.now()/1000)+43200});const data=`${header}.${payload}`;return`${data}.${hmac(data)}`}
 function verifySession(token){if(!token)throw new PublicError('กรุณาเข้าสู่ระบบ',401);const parts=String(token).split('.');if(parts.length!==3)throw new PublicError('เซสชันไม่ถูกต้อง',401);const expected=hmac(`${parts[0]}.${parts[1]}`),a=Buffer.from(parts[2]),b=Buffer.from(expected);if(a.length!==b.length||!crypto.timingSafeEqual(a,b))throw new PublicError('เซสชันไม่ถูกต้อง',401);const payload=JSON.parse(Buffer.from(parts[1],'base64url').toString());if(payload.exp<Math.floor(Date.now()/1000))throw new PublicError('เซสชันหมดอายุ กรุณาเข้าสู่ระบบใหม่',401);return payload}
 function b64(value){return Buffer.from(JSON.stringify(value)).toString('base64url')}function hmac(value){return crypto.createHmac('sha256',SESSION_SECRET).update(value).digest('base64url')}
 function sanitize(value,key){const v=String(value??'').trim();if(v.length>500)throw new PublicError('ข้อมูลยาวเกินกำหนด',400);if(key==='photoUrl'&&v&&!/^https:\/\//i.test(v))throw new PublicError('URL รูปภาพต้องขึ้นต้นด้วย https://',400);return v.replace(/[<>]/g,'')}
 function columnName(n){let s='';while(n>0){n--;s=String.fromCharCode(65+n%26)+s;n=Math.floor(n/26)}return s}
-function assertConfig(){for(const key of['GOOGLE_CLIENT_ID','GOOGLE_SERVICE_ACCOUNT_EMAIL','GOOGLE_PRIVATE_KEY','SESSION_SECRET'])if(!process.env[key]&&!(key==='GOOGLE_CLIENT_ID'&&CLIENT_ID))throw new Error(`Missing ${key}`)}
+function assertConfig(){for(const key of['GOOGLE_CLIENT_ID','SESSION_SECRET','SPREADSHEET_ID','GCP_PROJECT_NUMBER','GCP_SERVICE_ACCOUNT_EMAIL','GCP_WORKLOAD_IDENTITY_POOL_ID','GCP_WORKLOAD_IDENTITY_POOL_PROVIDER_ID'])if(!process.env[key]&&!(key==='GOOGLE_CLIENT_ID'&&CLIENT_ID))throw new Error(`Missing ${key}`)}
 class PublicError extends Error{constructor(message,status=400){super(message);this.publicMessage=message;this.status=status}}
