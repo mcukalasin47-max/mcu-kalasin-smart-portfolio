@@ -1,4 +1,4 @@
-# MCU Kalasin Smart Portfolio v3.0.1
+# MCU Kalasin Smart Portfolio v4.0.0 — Executive Ready
 
 ระบบแฟ้มสะสมผลงานและประเมินผลการปฏิบัติงานบุคลากร หน่วยวิทยบริการ วิทยาลัยสงฆ์ขอนแก่น จังหวัดกาฬสินธุ์
 
